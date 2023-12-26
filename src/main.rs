@@ -1,5 +1,11 @@
-use bevy::prelude::*;
+use bevy::{
+    prelude::*,
+    DefaultPlugins,
+};
+use bevy_particle_systems::{*, VelocityModifier::*,
+};
 use bevy_egui::{egui::{self, Widget}, EguiContexts, EguiPlugin};
+
 
 #[derive(Component, Default)]
 enum HandState {
@@ -77,12 +83,27 @@ impl Score {
     }
 }
 
+#[derive(Component)]
+struct BurstTimer(Timer);
+
+impl Default for BurstTimer {
+    fn default() -> Self {
+        BurstTimer(Timer::from_seconds(0.1, TimerMode::Once))
+    }
+}
+
 fn collect_score_system(
     mut score: ResMut<Score>,
     mut clicker_events: EventReader<ClicksEmitted>,
+    mut available_particle_systems: Query<(Entity, &mut BurstTimer), Without<Playing>>,
+    mut commands: Commands,
 ) {
-    for ClicksEmitted(clicks) in clicker_events.iter() {
+    for ClicksEmitted(clicks) in clicker_events.read() {
         score.stored_clicks += clicks;
+        for (_, (entity, mut timer)) in (0..*clicks).zip(available_particle_systems.iter_mut()) {
+            commands.entity(entity).insert(Playing);
+            timer.0.reset();
+        }
     }
 }
 
@@ -158,8 +179,8 @@ fn ui_system(
 
                     HandState::Autoed => {
                         if clap_timer.0.finished() {
-                            score.stored_clicks += clickers.len() as u64;
                             clap_timer.0.reset();
+                            clicker_events.send(ClicksEmitted(clickers.len() as u64));
                         }
                         
                         egui::ProgressBar::new(clap_timer.0.percent()).desired_width(100.0).ui(ui);
@@ -194,19 +215,62 @@ fn update_timers_system(mut all_clickers: Query<&mut TillCanClickTimer>, time: R
     }
 }
 
-fn setup(mut commands: Commands) {
+fn burst_deactivator_system(
+    mut commands: Commands,
+    mut burst_timers: Query<(Entity, &mut BurstTimer), With<Playing>>,
+    time: Res<Time>,
+) {
+    for (entity, mut burst_timer) in burst_timers.iter_mut() {
+        if burst_timer.0.tick(time.delta()).just_finished() {
+            commands.entity(entity).remove::<Playing>();
+        }
+    }
+    
+}
+
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.spawn(Camera2dBundle::default());
     commands.spawn(Hand::default()).with_children(|parent| {
         parent.spawn(Clicker::default());
-        parent.spawn(Clicker::default());
     });
+
+    for y_idx in -4..4 {
+        for x_idx in -6..6 {
+            commands
+                .spawn(ParticleSystemBundle {
+                    particle_system: ParticleSystem {
+                        max_particles: 5_000,
+                        texture: asset_server.load("spark.png").into(),
+                        spawn_rate_per_second: 1000.0.into(),
+                        initial_speed: JitteredValue::jittered(200.0, -50.0..50.0),
+                        velocity_modifiers: vec![Drag(0.01.into())],
+                        lifetime: JitteredValue::jittered(1.0, -0.5..0.5),
+                        color: ColorOverTime::Gradient(Curve::new(vec![
+                            CurvePoint::new(Color::RED, 0.0),
+                            CurvePoint::new(Color::YELLOW, 0.75),
+                            CurvePoint::new(Color::rgba(1.0, 1.0, 1.0, 0.0), 1.0),
+                        ])),
+                        looping: true,
+                        system_duration_seconds: 10.0,
+                        max_distance: Some(300.0),
+                        scale: 0.5.into(),
+                        ..ParticleSystem::default()
+                    },
+                    transform: Transform::from_xyz(100.0 * x_idx as f32, 100.0 * y_idx as f32, 0.0),
+                    ..ParticleSystemBundle::default()
+            }).insert(BurstTimer::default());
+        }
+    }
 }
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(EguiPlugin)
+        .add_plugins(ParticleSystemPlugin::default())
         .add_event::<ClicksEmitted>()
         .insert_resource(Score::default())
-        .add_systems(Update, (ui_system, update_timers_system, collect_score_system))
+        .add_systems(Update, (ui_system, update_timers_system, collect_score_system, burst_deactivator_system))
         .add_systems(Startup, setup)
         .run();
 }
