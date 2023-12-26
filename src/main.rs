@@ -56,21 +56,33 @@ struct Score {
     total_hands: u64,
 }
 
+#[derive(Event)]
+struct ClicksEmitted(u64);
+
 impl Score {
     fn finger_cost(&self) -> u64 {
-        self.total_fingers * 10 + 10
+        10 //self.total_fingers * 10 + 10
     }
 
     fn hand_cost(&self) -> u64 {
-        self.total_hands * 100 + 100
+        self.total_hands * 10 + 10
     }
 
     fn combine_cost(&self) -> u64 {
-        self.finger_cost()
+        30
     }
 
     fn auto_cost(&self) -> u64 {
-        self.finger_cost() * 2
+        60
+    }
+}
+
+fn collect_score_system(
+    mut score: ResMut<Score>,
+    mut clicker_events: EventReader<ClicksEmitted>,
+) {
+    for ClicksEmitted(clicks) in clicker_events.iter() {
+        score.stored_clicks += clicks;
     }
 }
 
@@ -80,6 +92,7 @@ fn ui_system(
     mut contexts: EguiContexts,
     mut commands: Commands,
     mut score: ResMut<Score>,
+    mut clicker_events: EventWriter<ClicksEmitted>,
 ) {
     for (mut hand, mut clap_timer, clickers, hand_entity) in hands.iter_mut() {
         egui::Window::new("Hand")
@@ -113,8 +126,8 @@ fn ui_system(
                             let (state, mut timer) = all_clickers.get_mut(*clicker).unwrap();
                             if timer.0.finished() {
                                 if ui.button("Click").clicked() {
-                                    score.stored_clicks += state.per_click;
                                     timer.0.reset();
+                                    clicker_events.send(ClicksEmitted(state.per_click))
                                 }
                             } else {
                                 egui::ProgressBar::new(timer.0.percent()).desired_width(100.0).ui(ui);
@@ -135,8 +148,8 @@ fn ui_system(
 
                         if clap_timer.0.finished() {
                             if ui.button("Clap").clicked() {
-                                score.stored_clicks += clickers.len() as u64;
                                 clap_timer.0.reset();
+                                clicker_events.send(ClicksEmitted(clickers.len() as u64));
                             }
                         } else {
                             egui::ProgressBar::new(clap_timer.0.percent()).desired_width(100.0).ui(ui);
@@ -191,8 +204,9 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(EguiPlugin)
+        .add_event::<ClicksEmitted>()
         .insert_resource(Score::default())
-        .add_systems(Update, (ui_system, update_timers_system))
+        .add_systems(Update, (ui_system, update_timers_system, collect_score_system))
         .add_systems(Startup, setup)
         .run();
 }
