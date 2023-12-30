@@ -4,7 +4,7 @@ use bevy::{
 };
 use bevy_particle_systems::{*, VelocityModifier::*,
 };
-use bevy_egui::{egui::{self, Widget}, EguiContexts, EguiPlugin};
+use bevy_egui::{egui::{self, Widget, ImageButton}, EguiContexts, EguiPlugin};
 
 
 #[derive(Component, Default)]
@@ -67,7 +67,7 @@ struct ClicksEmitted(u64);
 
 impl Score {
     fn finger_cost(&self) -> u64 {
-        10 //self.total_fingers * 10 + 10
+        10 * (1.04_f64).powf(self.total_fingers as f64) as u64
     }
 
     fn hand_cost(&self) -> u64 {
@@ -107,6 +107,35 @@ fn collect_score_system(
     }
 }
 
+fn burst_deactivator_system(
+    mut commands: Commands,
+    mut burst_timers: Query<(Entity, &mut BurstTimer), With<Playing>>,
+    time: Res<Time>,
+) {
+    for (entity, mut burst_timer) in burst_timers.iter_mut() {
+        if burst_timer.0.tick(time.delta()).just_finished() {
+            commands.entity(entity).remove::<Playing>();
+        }
+    }
+    
+}
+
+struct IconCache {
+    finger: egui::TextureId,
+    atlas: TextureAtlas,
+}
+
+impl IconCache {
+    fn uv_rect_for(&self, idx: usize) -> egui::Rect {
+        let px_rect = self.atlas.textures.get(idx).unwrap();
+        let tex_rect = self.atlas.size;
+        egui::Rect {
+            min: egui::Pos2::new(px_rect.min.x / tex_rect.x, px_rect.min.y / tex_rect.y),
+            max: egui::Pos2::new(px_rect.max.x / tex_rect.x, px_rect.max.y / tex_rect.y),
+        }
+    }
+}
+
 fn ui_system(
     mut hands: Query<(&mut HandState, &mut TillCanClickTimer, &Children, Entity), Without<ClickerState>>,
     mut all_clickers: Query<(&ClickerState, &mut TillCanClickTimer), With<ClickerLabel>>,
@@ -114,7 +143,16 @@ fn ui_system(
     mut commands: Commands,
     mut score: ResMut<Score>,
     mut clicker_events: EventWriter<ClicksEmitted>,
+    mut icons: Local<Option<IconCache>>,
+    asset_server: Res<AssetServer>
 ) {
+    if icons.is_none() {
+        let image = asset_server.load("finger.png");
+        let finger = contexts.add_image(image.clone());
+        let atlas = TextureAtlas::from_grid(image, Vec2::new(32.0, 32.0), 4, 1, None, None);
+        *icons = Some(IconCache { finger, atlas });
+    }
+
     for (mut hand, mut clap_timer, clickers, hand_entity) in hands.iter_mut() {
         egui::Window::new("Hand")
             .id(egui::Id::new(hand_entity))
@@ -143,17 +181,35 @@ fn ui_system(
                             ui.label(format!("Combine Hand ({})", score.combine_cost()));
                         }
                         
-                        for clicker in clickers {
-                            let (state, mut timer) = all_clickers.get_mut(*clicker).unwrap();
-                            if timer.0.finished() {
-                                if ui.button("Click").clicked() {
-                                    timer.0.reset();
-                                    clicker_events.send(ClicksEmitted(state.per_click))
+                        egui::Grid::new("fingers").num_columns(5).striped(true).show(ui, |ui| {
+                            for (idx, clicker) in Iterator::enumerate(clickers.iter()) {
+                                // end row every 5
+                                if idx % 5 == 0 && idx != 0 {
+                                    ui.end_row();
                                 }
-                            } else {
-                                egui::ProgressBar::new(timer.0.percent()).desired_width(100.0).ui(ui);
+
+                                let flip_idx = if idx % 5 == 0 {
+                                    2
+                                } else {
+                                    0
+                                };
+                                let (state, mut timer) = all_clickers.get_mut(*clicker).unwrap();
+                                if timer.0.finished() {
+                                    if ImageButton::new(egui::widgets::Image::new(egui::load::SizedTexture::new(
+                                        icons.as_ref().unwrap().finger,
+                                        [32.0,32.0]
+                                    )).uv(icons.as_ref().unwrap().uv_rect_for(flip_idx + 0))).ui(ui).clicked() {
+                                        timer.0.reset();
+                                        clicker_events.send(ClicksEmitted(state.per_click))
+                                    }
+                                } else {
+                                    ImageButton::new(egui::widgets::Image::new(egui::load::SizedTexture::new(
+                                        icons.as_ref().unwrap().finger,
+                                        [32.0,32.0]
+                                    )).uv(icons.as_ref().unwrap().uv_rect_for(flip_idx + 1))).selected(true).ui(ui);
+                                }
                             }
-                        }
+                        });
                     }
                     
                     HandState::Combined => {
@@ -215,19 +271,6 @@ fn update_timers_system(mut all_clickers: Query<&mut TillCanClickTimer>, time: R
     }
 }
 
-fn burst_deactivator_system(
-    mut commands: Commands,
-    mut burst_timers: Query<(Entity, &mut BurstTimer), With<Playing>>,
-    time: Res<Time>,
-) {
-    for (entity, mut burst_timer) in burst_timers.iter_mut() {
-        if burst_timer.0.tick(time.delta()).just_finished() {
-            commands.entity(entity).remove::<Playing>();
-        }
-    }
-    
-}
-
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(Camera2dBundle::default());
     commands.spawn(Hand::default()).with_children(|parent| {
@@ -235,7 +278,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     });
 
     for y_idx in -4..4 {
-        for x_idx in -6..6 {
+        for x_idx in -6..7 {
             commands
                 .spawn(ParticleSystemBundle {
                     particle_system: ParticleSystem {
