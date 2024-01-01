@@ -273,6 +273,14 @@ fn update_timers_system(mut all_clickers: Query<&mut TillCanClickTimer>, time: R
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(Camera2dBundle::default());
+
+    // set up backdrop
+    commands.spawn(SpriteBundle {
+        texture: asset_server.load("backdrop.png").into(),
+        transform: Transform::from_xyz(0.0, 0.0, 0.0).with_scale(Vec3::splat(4.0)),
+        ..SpriteBundle::default()
+    });
+
     commands.spawn(Hand::default()).with_children(|parent| {
         parent.spawn(Clicker::default());
     });
@@ -308,7 +316,9 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(
+            ImagePlugin::default_nearest(),
+        ))
         .add_plugins(EguiPlugin)
         .add_plugins(ParticleSystemPlugin::default())
         .add_event::<ClicksEmitted>()
