@@ -55,15 +55,35 @@ struct Clicker {
     state: ClickerState,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct Score {
     stored_clicks: u64,
     total_fingers: u64,
     total_hands: u64,
+    buildings: u32,
+}
+
+impl Default for Score {
+    fn default() -> Self {
+        Score {
+            stored_clicks: 0,
+            total_fingers: 1,
+            total_hands: 0,
+            buildings: 1,
+        }
+    }
 }
 
 #[derive(Event)]
 struct ClicksEmitted(u64);
+
+const MULTIPLIER_TABLE : [u64; 10] = [
+    40, 80, 100, 150, 200, 250, 300, 350, 375, 400
+];
+
+const CASHOUT_TABLE : [u64; 3] = [
+    10000, 100000000, 50000000000
+];
 
 impl Score {
     fn finger_cost(&self) -> u64 {
@@ -80,6 +100,35 @@ impl Score {
 
     fn auto_cost(&self) -> u64 {
         60
+    }
+
+    fn multiplier(&self) -> u64 {
+        let mut multiplier = 1u64;
+        for lmt in MULTIPLIER_TABLE.iter() {
+            if self.total_fingers >= *lmt {
+                multiplier *= 2;
+            }
+        };
+        // prestige bonus
+        multiplier *= 10u64.pow(self.buildings - 1);
+        multiplier
+    }
+
+    fn next_multiplier(&self) -> Option<u64> {
+        for lmt in MULTIPLIER_TABLE.iter() {
+            if self.total_fingers < *lmt {
+                return Some(*lmt);
+            }
+        };
+        None
+    }
+
+    fn cashout_cost(&self) -> Option<u64> {
+        if (self.buildings as usize) < CASHOUT_TABLE.iter().count() {
+            Some(CASHOUT_TABLE[self.buildings as usize - 1])
+        } else {
+            None
+        }
     }
 }
 
@@ -200,7 +249,7 @@ fn ui_system(
                                         [32.0,32.0]
                                     )).uv(icons.as_ref().unwrap().uv_rect_for(flip_idx + 0))).ui(ui).clicked() {
                                         timer.0.reset();
-                                        clicker_events.send(ClicksEmitted(state.per_click))
+                                        clicker_events.send(ClicksEmitted(state.per_click * score.multiplier()))
                                     }
                                 } else {
                                     ImageButton::new(egui::widgets::Image::new(egui::load::SizedTexture::new(
@@ -226,7 +275,7 @@ fn ui_system(
                         if clap_timer.0.finished() {
                             if ui.button("Clap").clicked() {
                                 clap_timer.0.reset();
-                                clicker_events.send(ClicksEmitted(clickers.len() as u64));
+                                clicker_events.send(ClicksEmitted((clickers.len() as u64) * score.multiplier()));
                             }
                         } else {
                             egui::ProgressBar::new(clap_timer.0.percent()).desired_width(100.0).ui(ui);
@@ -236,7 +285,7 @@ fn ui_system(
                     HandState::Autoed => {
                         if clap_timer.0.finished() {
                             clap_timer.0.reset();
-                            clicker_events.send(ClicksEmitted(clickers.len() as u64));
+                            clicker_events.send(ClicksEmitted((clickers.len() as u64) * score.multiplier()));
                         }
                         
                         egui::ProgressBar::new(clap_timer.0.percent()).desired_width(100.0).ui(ui);
@@ -250,6 +299,9 @@ fn ui_system(
 
     egui::Window::new("Store").show(contexts.ctx_mut(), |ui| {
         ui.label(format!("Clicks: {}", score.stored_clicks));
+        ui.label(format!("Fingers: {}", score.total_fingers));
+        ui.label(format!("Multiplier: {}", score.multiplier()));
+        ui.label(format!("Next Multiplier: {}", score.next_multiplier().unwrap_or(0)));
         // buy hand
         if score.stored_clicks >= score.hand_cost() {
             if ui.button(format!("Buy Hand ({})", score.hand_cost())).clicked() {
@@ -261,6 +313,27 @@ fn ui_system(
         } else {
             ui.label(format!("Buy Hand ({})", score.hand_cost()));
         }
+        if let Some(cashout) = score.cashout_cost() {
+            if score.stored_clicks >= cashout {
+                if ui.button(format!("Cashout ({})", cashout)).clicked() {
+                    score.stored_clicks = 0;
+                    score.buildings += 1;
+                    score.total_fingers = 1;
+                    score.total_hands = 0;
+                    // delete all the hands
+                    for (_, _, _, hand) in &hands {
+                        commands.entity(hand).despawn_recursive();
+                    }
+                    // return to initial state
+                    commands.spawn(Hand::default()).with_children(|parent| {
+                        parent.spawn(Clicker::default());
+                    });
+                }
+            } else {
+                ui.label(format!("Cashout ({})", cashout));
+            }
+            
+        }
     });
 
 }
@@ -271,7 +344,180 @@ fn update_timers_system(mut all_clickers: Query<&mut TillCanClickTimer>, time: R
     }
 }
 
-fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+struct ReadableImage<'a> {
+    image: &'a Image,
+    pixel_stride: usize,
+    row_stride: usize,
+}
+
+impl ReadableImage<'_> {
+    fn new(image: &Image) -> ReadableImage {
+        let pixel_stride = image.data.len() / (image.size().x * image.size().y) as usize;
+
+        ReadableImage {
+            image,
+            pixel_stride,
+            row_stride: (image.size().x as usize) * pixel_stride,
+        }
+    }
+
+    fn with_nonzero<T : FnMut(f32, f32, &[u8])>(&self, rect: Rect, mut f: T) {
+        let image_rect = Rect { min: Vec2::ZERO, max: self.image.size().as_vec2() };
+        let rect = image_rect.intersect(rect);
+        let minx = rect.min.x as usize;
+        let maxx = rect.max.x as usize;
+        let miny = rect.min.y as usize;
+        let maxy = rect.max.y as usize;
+        
+        // output center
+        let center = Vec2::new((maxx - minx) as f32 / 2.0, (maxy - miny) as f32 / 2.0);
+
+
+        for y in miny..maxy {
+            for x in minx..maxx {
+                let offset = (y * self.row_stride) + (x * self.pixel_stride);
+                let pixel = &self.image.data[offset..offset + self.pixel_stride];
+                
+                if pixel.iter().any(|&x| x != 0) {
+                    let x = (x - minx) as f32;
+                    let y = (y - miny) as f32;
+
+                    // invert and center y
+                    let y = (rect.height() - y) - center.y;
+
+                    // center x
+                    let x = x - center.x;
+                    f(x, y, pixel);
+                }
+            }
+        }
+    }
+}
+
+fn update_loading(
+    query: Query<Entity, (With<Loading>, With<Building>)>,
+    asset_server: ResMut<AssetServer>,
+    images: Res<Assets<Image>>,
+    mut commands: Commands,
+) {
+    let building = asset_server.load("building.png");
+    let image = images.get(building.clone());
+    if image.is_none() {
+        return;
+    }
+    let image = image.unwrap();
+    let ri = ReadableImage::new(image);
+    let atlas = TextureAtlas::from_grid(building.clone(), Vec2::new(61.0, 97.0), 2, 1, None, None);
+    for entity in &query {
+        commands.entity(entity).remove::<Loading>();
+        commands.entity(entity).with_children(|parent| {
+            ri.with_nonzero(atlas.textures[1], |x, y, pixel| {
+                // println!("{} {}", x, y);
+                // parent.spawn(SpriteBundle {
+                //     texture: asset_server.load("target.png").into(),
+                //     transform: Transform::from_xyz(x, y, 1.0).with_scale(Vec3::splat(0.25)),
+                //     ..SpriteBundle::default()
+                // });
+                if pixel[0] == 255 {
+                    // facing camera
+                    parent
+                        .spawn(ParticleSystemBundle {
+                            particle_system: ParticleSystem {
+                                max_particles: 10_000,
+                                texture: asset_server.load("spark.png").into(),
+                                spawn_rate_per_second: 1000.0.into(),
+                                initial_speed: JitteredValue::jittered(20.0, -500.0..500.0),
+                                velocity_modifiers: vec![Drag(0.001.into()), Vector(VectorOverTime::Constant(Vec3::new(0.0, -10.0, 0.0)))],
+                                lifetime: JitteredValue::jittered(0.1, 0.1..0.5),
+                                color: ColorOverTime::Gradient(Curve::new(vec![
+                                    CurvePoint::new(Color::RED, 0.0),
+                                    CurvePoint::new(Color::YELLOW, 0.75),
+                                    CurvePoint::new(Color::rgba(1.0, 1.0, 1.0, 0.0), 1.0),
+                                ])),
+                                looping: true,
+                                system_duration_seconds: 10.0,
+                                max_distance: Some(600.0),
+                                initial_scale: 0.01.into(),
+                                scale: 50.0.into(),
+                                ..ParticleSystem::default()
+                            },
+                            transform: Transform::from_xyz(x, y, 1.0),
+                            ..ParticleSystemBundle::default()
+                    }).insert(BurstTimer::default());
+                } else if pixel[1] == 255 {
+                    // facing left
+                    parent
+                        .spawn(ParticleSystemBundle {
+                            particle_system: ParticleSystem {
+                                max_particles: 10_000,
+                                emitter_shape: EmitterShape::CircleSegment(CircleSegment {
+                                    opening_angle: 0.5 * std::f32::consts::PI,
+                                    radius: 0.0.into(),
+                                    direction_angle: std::f32::consts::PI,
+                                }),
+                                texture: asset_server.load("spark.png").into(),
+                                spawn_rate_per_second: 1000.0.into(),
+                                initial_speed: JitteredValue::jittered(200.0, -50.0..50.0),
+                                velocity_modifiers: vec![Drag(0.01.into())],
+                                lifetime: JitteredValue::jittered(1.0, -0.5..0.5),
+                                color: ColorOverTime::Gradient(Curve::new(vec![
+                                    CurvePoint::new(Color::RED, 0.0),
+                                    CurvePoint::new(Color::YELLOW, 0.75),
+                                    CurvePoint::new(Color::rgba(1.0, 1.0, 1.0, 0.0), 1.0),
+                                ])),
+                                looping: true,
+                                system_duration_seconds: 10.0,
+                                max_distance: Some(300.0),
+                                scale: 0.5.into(),
+                                ..ParticleSystem::default()
+                            },
+                            transform: Transform::from_xyz(x, y, 1.0),
+                            ..ParticleSystemBundle::default()
+                    }).insert(BurstTimer::default());
+                } else {
+                    println!("{:?}", pixel);
+                }
+                
+            });
+        });
+    }
+}
+
+#[derive(Component)]
+struct Loading;
+
+#[derive(Component)]
+struct Building;
+
+fn sync_buildings(
+    query: Query<Entity, With<Building>>,
+    score: Res<Score>,
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut atlases: ResMut<Assets<TextureAtlas>>,
+) {
+    // add buildings
+    let building = asset_server.load("building.png");
+    let atlas_handle = TextureAtlas::from_grid(building.clone(), Vec2::new(61.0, 97.0), 2, 1, None, None);
+    let atlas = atlases.add(atlas_handle);
+
+    let existing = query.iter().count();
+    let missing = score.buildings as usize - existing;
+
+    for x_idx in existing..existing + missing {
+        println!("creating building {}", x_idx);
+        commands.spawn((Loading, Building, SpriteSheetBundle {
+            texture_atlas: atlas.clone(),
+            transform: Transform::from_xyz(-200.0 * x_idx as f32, -50.0 as f32, 0.5).with_scale(Vec3::splat(4.0)),
+            ..SpriteSheetBundle::default()
+        }));
+    }  
+}
+
+fn setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+) {
     commands.spawn(Camera2dBundle::default());
 
     // set up backdrop
@@ -284,34 +530,6 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(Hand::default()).with_children(|parent| {
         parent.spawn(Clicker::default());
     });
-
-    for y_idx in -4..4 {
-        for x_idx in -6..7 {
-            commands
-                .spawn(ParticleSystemBundle {
-                    particle_system: ParticleSystem {
-                        max_particles: 5_000,
-                        texture: asset_server.load("spark.png").into(),
-                        spawn_rate_per_second: 1000.0.into(),
-                        initial_speed: JitteredValue::jittered(200.0, -50.0..50.0),
-                        velocity_modifiers: vec![Drag(0.01.into())],
-                        lifetime: JitteredValue::jittered(1.0, -0.5..0.5),
-                        color: ColorOverTime::Gradient(Curve::new(vec![
-                            CurvePoint::new(Color::RED, 0.0),
-                            CurvePoint::new(Color::YELLOW, 0.75),
-                            CurvePoint::new(Color::rgba(1.0, 1.0, 1.0, 0.0), 1.0),
-                        ])),
-                        looping: true,
-                        system_duration_seconds: 10.0,
-                        max_distance: Some(300.0),
-                        scale: 0.5.into(),
-                        ..ParticleSystem::default()
-                    },
-                    transform: Transform::from_xyz(100.0 * x_idx as f32, 100.0 * y_idx as f32, 0.0),
-                    ..ParticleSystemBundle::default()
-            }).insert(BurstTimer::default());
-        }
-    }
 }
 
 fn main() {
@@ -323,7 +541,14 @@ fn main() {
         .add_plugins(ParticleSystemPlugin::default())
         .add_event::<ClicksEmitted>()
         .insert_resource(Score::default())
-        .add_systems(Update, (ui_system, update_timers_system, collect_score_system, burst_deactivator_system))
+        .add_systems(Update, (
+            ui_system,
+            update_timers_system,
+            collect_score_system,
+            burst_deactivator_system,
+            sync_buildings,
+            update_loading
+        ))
         .add_systems(Startup, setup)
         .run();
 }
