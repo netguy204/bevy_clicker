@@ -124,7 +124,7 @@ impl Score {
     }
 
     fn cashout_cost(&self) -> Option<u64> {
-        if (self.buildings as usize) < CASHOUT_TABLE.iter().count() {
+        if (self.buildings as usize) <= CASHOUT_TABLE.iter().count() {
             Some(CASHOUT_TABLE[self.buildings as usize - 1])
         } else {
             None
@@ -332,7 +332,6 @@ fn ui_system(
             } else {
                 ui.label(format!("Cashout ({})", cashout));
             }
-            
         }
     });
 
@@ -508,7 +507,7 @@ fn sync_buildings(
         println!("creating building {}", x_idx);
         commands.spawn((Loading, Building, SpriteSheetBundle {
             texture_atlas: atlas.clone(),
-            transform: Transform::from_xyz(-200.0 * x_idx as f32, -50.0 as f32, 0.5).with_scale(Vec3::splat(4.0)),
+            transform: Transform::from_xyz(-200.0 * x_idx as f32, -50.0 as f32, 0.5 + x_idx as f32 / 10.0f32).with_scale(Vec3::splat(4.0)),
             ..SpriteSheetBundle::default()
         }));
     }  
