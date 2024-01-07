@@ -4,8 +4,16 @@ use bevy::{
 };
 use bevy_particle_systems::{*, VelocityModifier::*,
 };
-use bevy_egui::{egui::{self, Widget, ImageButton}, EguiContexts, EguiPlugin};
+use bevy_egui::{egui::{self, Widget}, EguiContexts, EguiPlugin};
+use thousands::Separable;
 
+#[derive(Clone, PartialEq, Eq, Hash, Debug, States, Default)]
+enum State {
+    #[default]
+    Welcome,
+    Game,
+    Finished,
+}
 
 #[derive(Component, Default)]
 enum HandState {
@@ -77,13 +85,15 @@ impl Default for Score {
 #[derive(Event)]
 struct ClicksEmitted(u64);
 
-const MULTIPLIER_TABLE : [u64; 10] = [
-    40, 80, 100, 150, 200, 250, 300, 350, 375, 400
+const MULTIPLIER_TABLE : [u64; 19] = [
+    40, 80, 100, 150, 200, 250, 300, 350, 375, 400, 425, 450, 470, 475, 500, 525, 550, 575, 600
 ];
 
 const CASHOUT_TABLE : [u64; 3] = [
     10000, 100000000, 50000000000
 ];
+
+const WIN_SCORE : u64 = 1_000_000_000_000;
 
 impl Score {
     fn finger_cost(&self) -> u64 {
@@ -146,6 +156,7 @@ fn collect_score_system(
     mut clicker_events: EventReader<ClicksEmitted>,
     mut available_particle_systems: Query<(Entity, &mut BurstTimer), Without<Playing>>,
     mut commands: Commands,
+    mut next_state: ResMut<NextState<State>>,
 ) {
     for ClicksEmitted(clicks) in clicker_events.read() {
         score.stored_clicks += clicks;
@@ -153,6 +164,9 @@ fn collect_score_system(
             commands.entity(entity).insert(Playing);
             timer.0.reset();
         }
+    }
+    if score.stored_clicks >= WIN_SCORE {
+        next_state.set(State::Finished);
     }
 }
 
@@ -169,22 +183,6 @@ fn burst_deactivator_system(
     
 }
 
-struct IconCache {
-    finger: egui::TextureId,
-    atlas: TextureAtlas,
-}
-
-impl IconCache {
-    fn uv_rect_for(&self, idx: usize) -> egui::Rect {
-        let px_rect = self.atlas.textures.get(idx).unwrap();
-        let tex_rect = self.atlas.size;
-        egui::Rect {
-            min: egui::Pos2::new(px_rect.min.x / tex_rect.x, px_rect.min.y / tex_rect.y),
-            max: egui::Pos2::new(px_rect.max.x / tex_rect.x, px_rect.max.y / tex_rect.y),
-        }
-    }
-}
-
 fn ui_system(
     mut hands: Query<(&mut HandState, &mut TillCanClickTimer, &Children, Entity), Without<ClickerState>>,
     mut all_clickers: Query<(&ClickerState, &mut TillCanClickTimer), With<ClickerLabel>>,
@@ -192,18 +190,9 @@ fn ui_system(
     mut commands: Commands,
     mut score: ResMut<Score>,
     mut clicker_events: EventWriter<ClicksEmitted>,
-    mut icons: Local<Option<IconCache>>,
-    asset_server: Res<AssetServer>
 ) {
-    if icons.is_none() {
-        let image = asset_server.load("finger.png");
-        let finger = contexts.add_image(image.clone());
-        let atlas = TextureAtlas::from_grid(image, Vec2::new(32.0, 32.0), 4, 1, None, None);
-        *icons = Some(IconCache { finger, atlas });
-    }
-
     for (mut hand, mut clap_timer, clickers, hand_entity) in hands.iter_mut() {
-        egui::Window::new("Hand")
+        egui::Window::new(format!("Hand (+{}/s)", ((clickers.len() as u64) * score.multiplier()).separate_with_commas()))
             .id(egui::Id::new(hand_entity))
             .show(contexts.ctx_mut(), |ui| {
 
@@ -211,23 +200,23 @@ fn ui_system(
                     HandState::Filling => {
                         // buy finger
                         if score.stored_clicks >= score.finger_cost() {
-                            if ui.button(format!("Buy Finger ({})", score.finger_cost())).clicked() {
+                            if ui.button(format!("Buy Finger (-{})", score.finger_cost().separate_with_commas())).clicked() {
                                 commands.spawn(Clicker::default()).set_parent(hand_entity);
                                 score.stored_clicks -= score.finger_cost();
                                 score.total_fingers += 1;
                             }
                         } else {
-                            ui.label(format!("Buy finger ({})", score.finger_cost()));
+                            ui.label(format!("Buy finger (-{})", score.finger_cost().separate_with_commas()));
                         }
                         // make hand
                         if score.stored_clicks >= score.combine_cost() {
-                            if ui.button(format!("Combine Hand ({})", score.combine_cost())).clicked() {
+                            if ui.button(format!("Combine Hand (-{})", score.combine_cost())).clicked() {
                                 *hand = HandState::Combined;
                                 score.stored_clicks -= score.combine_cost();
                                 score.total_hands += 1;
                             }
                         } else {
-                            ui.label(format!("Combine Hand ({})", score.combine_cost()));
+                            ui.label(format!("Combine Hand (-{})", score.combine_cost()));
                         }
                         
                         egui::Grid::new("fingers").num_columns(5).striped(true).show(ui, |ui| {
@@ -237,25 +226,14 @@ fn ui_system(
                                     ui.end_row();
                                 }
 
-                                let flip_idx = if idx % 5 == 0 {
-                                    2
-                                } else {
-                                    0
-                                };
                                 let (state, mut timer) = all_clickers.get_mut(*clicker).unwrap();
                                 if timer.0.finished() {
-                                    if ImageButton::new(egui::widgets::Image::new(egui::load::SizedTexture::new(
-                                        icons.as_ref().unwrap().finger,
-                                        [32.0,32.0]
-                                    )).uv(icons.as_ref().unwrap().uv_rect_for(flip_idx + 0))).ui(ui).clicked() {
+                                    if ui.button(format!("Click (+{})", score.multiplier().separate_with_commas())).clicked() {
                                         timer.0.reset();
                                         clicker_events.send(ClicksEmitted(state.per_click * score.multiplier()))
                                     }
                                 } else {
-                                    ImageButton::new(egui::widgets::Image::new(egui::load::SizedTexture::new(
-                                        icons.as_ref().unwrap().finger,
-                                        [32.0,32.0]
-                                    )).uv(icons.as_ref().unwrap().uv_rect_for(flip_idx + 1))).selected(true).ui(ui);
+                                    egui::widgets::Button::new(format!("Click (+{})", score.multiplier().separate_with_commas())).selected(true).ui(ui);
                                 }
                             }
                         });
@@ -264,16 +242,16 @@ fn ui_system(
                     HandState::Combined => {
                         // make hand auto
                         if score.stored_clicks >= score.auto_cost() {
-                            if ui.button(format!("Make Auto ({})", score.auto_cost())).clicked() {
+                            if ui.button(format!("Make Auto (-{})", score.auto_cost())).clicked() {
                                 *hand = HandState::Autoed;
                                 score.stored_clicks -= score.auto_cost();
                             }
                         } else {
-                            ui.label(format!("Make Auto ({})", score.auto_cost()));
+                            ui.label(format!("Make Auto (-{})", score.auto_cost()));
                         }
 
                         if clap_timer.0.finished() {
-                            if ui.button("Clap").clicked() {
+                            if ui.button(format!("Clap (+{})", ((clickers.len() as u64) * score.multiplier()).separate_with_commas())).clicked() {
                                 clap_timer.0.reset();
                                 clicker_events.send(ClicksEmitted((clickers.len() as u64) * score.multiplier()));
                             }
@@ -298,25 +276,25 @@ fn ui_system(
     }
 
     egui::Window::new("Store").show(contexts.ctx_mut(), |ui| {
-        ui.label(format!("Clicks: {}", score.stored_clicks));
-        ui.label(format!("Fingers: {}", score.total_fingers));
-        ui.label(format!("Multiplier: {}", score.multiplier()));
-        ui.label(format!("Next Multiplier: {}", score.next_multiplier().unwrap_or(0)));
+        ui.label(format!("Clicks: {}", score.stored_clicks.separate_with_commas()));
+        ui.label(format!("Fingers: {}", score.total_fingers.separate_with_commas()));
+        ui.label(format!("Multiplier: {}", score.multiplier().separate_with_commas()));
+        ui.label(format!("Next Multiplier: {}", score.next_multiplier().unwrap_or(0)).separate_with_commas());
         // buy hand
         if score.stored_clicks >= score.hand_cost() {
-            if ui.button(format!("Buy Hand ({})", score.hand_cost())).clicked() {
+            if ui.button(format!("Buy Hand (-{})", score.hand_cost())).clicked() {
                 // spawn with empty children so our query can find it
                 commands.spawn(Hand::default()).with_children(|_parent| {});
                 score.stored_clicks -= score.hand_cost();
                 score.total_hands += 1;
             }
         } else {
-            ui.label(format!("Buy Hand ({})", score.hand_cost()));
+            ui.label(format!("Buy Hand (-{})", score.hand_cost().separate_with_commas()));
         }
         if let Some(cashout) = score.cashout_cost() {
             if score.stored_clicks >= cashout {
-                if ui.button(format!("Cashout ({})", cashout)).clicked() {
-                    score.stored_clicks = 0;
+                if ui.button(format!("Cashout (-{})", cashout.separate_with_commas())).clicked() {
+                    score.stored_clicks -= cashout;
                     score.buildings += 1;
                     score.total_fingers = 1;
                     score.total_hands = 0;
@@ -330,8 +308,10 @@ fn ui_system(
                     });
                 }
             } else {
-                ui.label(format!("Cashout ({})", cashout));
+                ui.label(format!("Cashout (-{})", cashout.separate_with_commas()));
             }
+        } else {
+            ui.label(format!("Win {}", WIN_SCORE.separate_with_commas()));
         }
     });
 
@@ -504,7 +484,6 @@ fn sync_buildings(
     let missing = score.buildings as usize - existing;
 
     for x_idx in existing..existing + missing {
-        println!("creating building {}", x_idx);
         commands.spawn((Loading, Building, SpriteSheetBundle {
             texture_atlas: atlas.clone(),
             transform: Transform::from_xyz(-200.0 * x_idx as f32, -50.0 as f32, 0.5 + x_idx as f32 / 10.0f32).with_scale(Vec3::splat(4.0)),
@@ -531,15 +510,77 @@ fn setup(
     });
 }
 
+fn welcome_window(
+    mut contexts: EguiContexts,
+    mut next_state: ResMut<NextState<State>>,
+    mut message_index: Local<u32>,
+) {
+    egui::Window::new("Welcome")
+        .id("welcome".into())
+        .show(contexts.ctx_mut(), |ui| {
+            if *message_index == 0 {
+                ui.label("Welcome to my psychologically abusive game");
+                if ui.button("Next").clicked() {
+                    *message_index += 1;
+                }
+            }
+            if *message_index == 1 {
+                ui.label("You are building a social media influence empire.\nClick your way to the top!");
+                if ui.button("Next").clicked() {
+                    *message_index += 1;
+                }
+            }
+            if *message_index == 2 {
+                ui.label("You'll need more fingers to do all that clicking, so buy them. And automate them.");
+                if ui.button("Next").clicked() {
+                    *message_index += 1;
+                }
+            }
+            if *message_index == 3 {
+                ui.label("With enough fingers, you'll receive synergy multipliers,\nthat's how things really get going.");
+                if ui.button("Next").clicked() {
+                    *message_index += 1;
+                }
+            }
+            if *message_index == 4 {
+                ui.label("But, the real way to the top is to cashout and use your influence and bonuses to start a new empire.");
+                if ui.button("Next").clicked() {
+                    *message_index += 1;
+                }
+            }
+            if *message_index == 5 {
+                ui.label("You win when you accumulate 1 trillion clicks.\nThe prize is having had your play time erased from your life.");
+                if ui.button("Start").clicked() {
+                    next_state.set(State::Game);
+                }
+            }
+        });
+}
+
+fn win_window(
+    mut contexts: EguiContexts,
+) {
+    egui::Window::new("You Win!")
+        .id("win".into())
+        .show(contexts.ctx_mut(), |ui| {
+            ui.label("You win! But, you gave up minutes your life to do it. So, you probably lose too. Go outside.");
+        });
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(
             ImagePlugin::default_nearest(),
         ))
         .add_plugins(EguiPlugin)
+        .add_state::<State>()
         .add_plugins(ParticleSystemPlugin::default())
         .add_event::<ClicksEmitted>()
         .insert_resource(Score::default())
+        .add_systems(Update, (
+            welcome_window
+        ).run_if(in_state(State::Welcome)))
+        .add_systems(OnEnter(State::Game), setup)
         .add_systems(Update, (
             ui_system,
             update_timers_system,
@@ -547,7 +588,7 @@ fn main() {
             burst_deactivator_system,
             sync_buildings,
             update_loading
-        ))
-        .add_systems(Startup, setup)
+        ).run_if(in_state(State::Game)))
+        .add_systems(Update, win_window.run_if(in_state(State::Finished)))
         .run();
 }
