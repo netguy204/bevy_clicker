@@ -1,7 +1,8 @@
 [package]
 name = "bevy_clicker2"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
+description = "A social clicker game"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -10,3 +11,10 @@ bevy = "0.12.1"
 bevy_egui = "0.24.0"
 bevy_particle_systems = "0.11.2"
 thousands = "0.2.0"
+
+[package.metadata.bundle]
+name = "SocialClicker"
+icon = ["assets/32x32.png"]
+identifier = "org.wubo.socialclicker"
+version = "1.0.0"
+resources = ["assets"]
